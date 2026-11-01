@@ -57,25 +57,29 @@ for tool in ld nm lipo libtool otool ar ranlib strip; do
 done
 
 section "3. Patched clang: __builtin_xnu_type_* present"
-# kalloc_type signatures have no fallback without these, so a clang built from
-# unpatched llvm-project compiles xnu's headers to errors.
+# llvm-xnu-builtin-type.patch adds exactly three builtins. kalloc_type
+# signatures have no fallback without them, so a clang built from unpatched
+# llvm-project fails to compile xnu's headers.
 probe="$RUNNER_TEMP/xnu-builtin-probe.c"
 mkdir -p "$RUNNER_TEMP"
 cat > "$probe" <<'EOF'
 #if !__has_builtin(__builtin_xnu_type_summary)
 #error missing __builtin_xnu_type_summary
 #endif
-#if !__has_builtin(__builtin_xnu_type_size)
-#error missing __builtin_xnu_type_size
+#if !__has_builtin(__builtin_xnu_type_signature)
+#error missing __builtin_xnu_type_signature
+#endif
+#if !__has_builtin(__builtin_xnu_types_compatible)
+#error missing __builtin_xnu_types_compatible
 #endif
 int probe;
 EOF
 if "$PREFIX/llvm/bin/clang" -target arm64e-apple-macos26.0 \
      -E "$probe" >/dev/null 2>&1; then
-    ok "__builtin_xnu_type_summary / __builtin_xnu_type_size"
+    ok "__builtin_xnu_type_summary / type_signature / types_compatible"
 else
     bad "clang lacks the xnu builtins (llvm-xnu-builtin-type.patch did not apply)"
-    "$PREFIX/llvm/bin/clang" -target arm64e-apple-macos26.0 -E "$probe" 2>&1 | tail -5 | sed 's/^/        /'
+    "$PREFIX/llvm/bin/clang" -target arm64e-apple-macos26.0 -E "$probe" 2>&1 | tail -8 | sed 's/^/        /'
 fi
 
 section "4. Cross compile: AArch64 Mach-O object"
