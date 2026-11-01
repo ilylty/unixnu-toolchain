@@ -31,10 +31,15 @@ on:
         default: false
   push:
     branches: [main]
+    # Only the inputs that change the produced bytes. Editing README.md or the
+    # device templates must not start a two-hour LLVM build: the tag is derived
+    # from UniXNU/scripts/linux, the pinned refs, the host LLVM and the runner
+    # release, none of which those files affect, so the run would find the
+    # existing release and stop -- after paying for checkout and tool install.
     paths:
       - '.github/workflows/build-toolchain.yml'
-      - 'scripts/**'
-      - 'README.md'
+      - 'scripts/toolchain-tag.py'
+      - 'scripts/smoke-test.sh'
 
 permissions:
   contents: write
