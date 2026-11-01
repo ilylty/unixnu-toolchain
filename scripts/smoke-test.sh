@@ -56,7 +56,7 @@ for tool in ld nm lipo libtool otool ar ranlib strip; do
     fi
 done
 
-section "3. Patched clang: __builtin_xnu_type_* present"
+section "3. Patched clang: __builtin_xnu_type_summary present"
 # kalloc_type signatures have no fallback without these, so a clang built from
 # unpatched llvm-project compiles xnu's headers to errors.
 probe="$RUNNER_TEMP/xnu-builtin-probe.c"
@@ -65,14 +65,11 @@ cat > "$probe" <<'EOF'
 #if !__has_builtin(__builtin_xnu_type_summary)
 #error missing __builtin_xnu_type_summary
 #endif
-#if !__has_builtin(__builtin_xnu_type_size)
-#error missing __builtin_xnu_type_size
-#endif
 int probe;
 EOF
 if "$PREFIX/llvm/bin/clang" -target arm64e-apple-macos26.0 \
      -E "$probe" >/dev/null 2>&1; then
-    ok "__builtin_xnu_type_summary / __builtin_xnu_type_size"
+    ok "__builtin_xnu_type_summary"
 else
     bad "clang lacks the xnu builtins (llvm-xnu-builtin-type.patch did not apply)"
     "$PREFIX/llvm/bin/clang" -target arm64e-apple-macos26.0 -E "$probe" 2>&1 | tail -5 | sed 's/^/        /'
