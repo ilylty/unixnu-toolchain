@@ -26,15 +26,18 @@ asset has none of those limits.
 
 ## Using it
 
-In a job:
+In a device repository's `.github/workflows/package.yml`, before the packaging
+step. The device workflow itself is `templates/device-package.yml` from this
+repository -- see `templates/README.md`.
 
 ```yaml
 - uses: actions/checkout@v4
   with: { repository: ilylty/unixnu-toolchain, path: toolchain }
-- uses: actions/checkout@v4
-  with: { repository: UniXNU/UniXNU, path: UniXNU }
 
 - name: Install the toolchain
+  env:
+    GH_TOKEN: ${{ github.token }}
+    TOOLCHAIN_REPOSITORY: ilylty/unixnu-toolchain
   run: bash toolchain/scripts/fetch-toolchain.sh /opt/unixnu-linux
 
 # scripts/unixnu/kernel.py checks /usr/bin/xcrun. The tarball cannot carry it,
@@ -50,7 +53,15 @@ In a job:
   run: bash toolchain/scripts/smoke-test.sh /opt/unixnu-linux
 ```
 
-Then build as usual with `UNIXNU_TOOLCHAIN=/opt/unixnu-linux`.
+Then run the packaging script the way `docs/porting/packaging.md` requires --
+one command, six fixed steps, everything else from `board.toml`:
+
+```bash
+scripts/package.sh --os "$PROFILE" --uefi ../uefi-firmware
+```
+
+That writes `out/<device>/<os_profile>/<config>/` with `boot/boot.img`,
+`payload/payload.img`, `kernel/kernel.macho` and `package.manifest.json`.
 
 To regenerate `toolchain.lock` after a new release:
 
@@ -122,3 +133,13 @@ libraries and the rest of LLVM are never installed.
   (`-DLLVM_ENABLE_ASSERTIONS=ON`), matching what `setup-toolchain.py` produces.
 - **No macOS path.** UniXNU's official `macos.yml` uses Xcode and does not need
   this toolchain.
+- **This repository is not a device repository.** It holds no `board.toml` and
+  no `scripts/package.sh`. The device side is a copy of
+  `UniXNU/templates/package.sh` plus `templates/device-package.yml` from here.
+  `docs/porting/packaging.md` rule 3 makes that split mandatory: a device
+  changes `board.toml`, never the packaging script.
+- **`pack` runs in CI, not locally.** `unixnu release` packs the boot image from
+  the firmware volume, the device tree and the payload, and then `verify`s it
+  against `package.manifest.json`. An earlier draft of this repository assumed
+  the boot image would be assembled on the developer's machine; the packaging
+  document makes it the fifth of six fixed steps.

@@ -1,0 +1,204 @@
+name: package
+
+# TEMPLATE for a device repository's .github/workflows/package.yml.
+# See templates/README.md. The device repository copies this file; the only
+# per-device value is the repository variable UNIXNU_UEFI_REPOSITORY.
+#
+# scripts/package.sh of the device repository on a Linux runner, with the UniXNU
+# and uefi-firmware checkouts beside it, in the layout board.toml names.
+#
+# This follows docs/porting/packaging.md: one command runs the six fixed steps
+# (deps, preflight, patches, build, pack, verify) and writes the three outputs
+# plus package.manifest.json. Nothing here restates a step order, a device
+# name, a path, a size, a kernel argument or a version -- those live in
+# board.toml. The only board value this file passes explicitly is the OS
+# profile, which the document makes a parameter of the run.
+#
+# The difference from the official package.yml is the runner: UniXNU's own
+# device workflows use macos-26 for Xcode. The kernel step also builds on
+# glibc Linux with scripts/linux/setup-toolchain.py, which this workflow takes
+# prebuilt from a release instead of compiling for 1-2 hours per run.
+#
+# The platform seed comes from the repository secret UNIXNU_UNIQUE_CHIP_ID and
+# is baked into the images, so the run's artifacts belong to one device alone:
+# download them, then delete the run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS profile of the images"
+        type: string
+        default: "17.7.11"
+        required: true
+      toolchain_tag:
+        description: "Toolchain release tag (empty reads toolchain.lock)"
+        type: string
+        default: ""
+        required: false
+      check_only:
+        description: "Run deps, preflight and patches, print the patch series, stop before any build"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      PREFIX: /opt/unixnu-linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          path: UniXNU
+          submodules: recursive
+
+      # [firmware] packages lists "{uefi}", so the firmware step needs the
+      # platform package of this device. board.toml names it; a board without a
+      # firmware volume of its own points at a shared one.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.UNIXNU_UEFI_REPOSITORY || 'UniXNU/uefi-sheng' }}
+          path: uefi-firmware
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ilylty/unixnu-toolchain
+          path: toolchain
+
+      - name: Tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config ninja-build cmake flex bison \
+            git patch python3 python3-dev xz-utils bzip2 cpio rsync \
+            curl wget ca-certificates tcsh unifdef mtools \
+            libssl-dev zlib1g-dev libbsd-dev uuid-dev \
+            llvm-dev libclang-dev device-tree-compiler clang lld zstd
+          # Fail fast, naming the tool, before an hour of build.
+          ok=1
+          for t in python3 git make cmake ninja dtc fdtget fdtput mformat mcopy \
+                   mkenvimage zstd curl; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
+          done
+          for t in llvm-nm llvm-objcopy llvm-strip; do
+            command -v "$t" >/dev/null \
+              || ls /usr/lib/llvm-*/bin/"$t" >/dev/null 2>&1 \
+              || { echo "missing tool: $t"; ok=0; }
+          done
+          [ "$ok" = 1 ]
+
+      - name: Install the toolchain
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOLCHAIN_TAG: ${{ inputs.toolchain_tag }}
+          TOOLCHAIN_REPOSITORY: ilylty/unixnu-toolchain
+        run: bash toolchain/scripts/fetch-toolchain.sh "$PREFIX"
+
+      # scripts/unixnu/kernel.py::linux_env() checks /usr/bin/xcrun before it
+      # builds. The archive deliberately carries no shim: setup-toolchain.py
+      # installs the three it needs and is idempotent, so on an unpacked
+      # toolchain it skips every built component and only places the shims.
+      - name: Install the /usr/bin shims
+        run: |
+          set -euo pipefail
+          sudo env UNIXNU_TOOLCHAIN="$PREFIX" \
+            python3 UniXNU/scripts/linux/setup-toolchain.py "$PREFIX" \
+            --llvm-config "$(command -v llvm-config)" 2>&1 | tail -20
+          sudo chown -R "$(id -u):$(id -g)" "$PREFIX"
+          for shim in xcrun plutil codesign; do
+            test -x "/usr/bin/$shim" || { echo "::error::/usr/bin/$shim missing"; exit 1; }
+          done
+
+      - name: Verify the toolchain
+        run: bash toolchain/scripts/smoke-test.sh "$PREFIX"
+
+      - name: Platform seed
+        env:
+          seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          if ! [[ "${seed:-}" =~ ^[0-9a-fA-F]{8}$ ]]; then
+            echo 'Set the repository secret UNIXNU_UNIQUE_CHIP_ID: the platform seed of the device, 8 hex digits.' >&2
+            exit 1
+          fi
+
+      - name: Package
+        working-directory: device
+        env:
+          UNIXNU_TOOLCHAIN: /opt/unixnu-linux
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          UNIXNU_UEFI: ${{ github.workspace }}/uefi-firmware
+          GITHUB_TOKEN: ${{ github.token }}
+          CCACHE: python3 ${{ github.workspace }}/device/scripts/compile-records.py
+        run: |
+          set -euo pipefail
+          args=(--os "${{ inputs.os }}" --uefi "$UNIXNU_UEFI")
+          [ "${{ inputs.check_only }}" = "true" ] && args+=(--check)
+          scripts/package.sh "${args[@]}" 2>&1 \
+            | tee "$RUNNER_TEMP/package.log"
+          # The step names of docs/porting/packaging.md, asserted from the log
+          # so a silently skipped stage cannot pass for a build.
+          for step in deps preflight patches build pack verify; do
+            grep -q "^step $step$" "$RUNNER_TEMP/package.log" \
+              || { echo "::error::package.sh never reached step $step"; exit 1; }
+          done
+
+      # The four outputs docs/porting/packaging.md documents, at the paths it
+      # documents: out/<device>/<os_profile>/<config>/...
+      - name: Images
+        if: ${{ !inputs.check_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ inputs.os }}-${{ github.run_id }}
+          # One device's boot images, not kept: the document says download them
+          # and then delete the run.
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            UniXNU/out/*/*/*/boot/boot.img
+            UniXNU/out/*/*/*/payload/payload.img
+            UniXNU/out/*/*/*/kernel/kernel.macho
+            UniXNU/out/*/*/*/package.manifest.json
+
+      - name: Manifest
+        if: ${{ !inputs.check_only }}
+        run: |
+          set -euo pipefail
+          manifest=$(find UniXNU/out -name package.manifest.json | head -1)
+          cat "$manifest" | tee "$GITHUB_STEP_SUMMARY"
+          python3 - "$manifest" <<'PY'
+          import json, sys
+          m = json.load(open(sys.argv[1]))
+          print()
+          print('device              :', m['device'])
+          print('os profile          :', m['os_profile'])
+          print('configuration       :', m['configuration'])
+          print('kernel cmdline bytes:', m['kernel_command_line_bytes'])
+          print('patches             :', len(m['patches']))
+          for name, info in sorted(m['outputs'].items()):
+              print(f'{name:20}: {info["bytes"]:>12,} bytes  {info["sha256"][:16]}')
+          PY
+
+      - name: Upload the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-log-${{ github.run_id }}
+          path: ${{ runner.temp }}/package.log
+          if-no-files-found: ignore
+          retention-days: 7
