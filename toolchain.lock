@@ -1,0 +1,19 @@
+# UniXNU Linux toolchain pin.
+#
+# Consumed by scripts/fetch-toolchain.sh; regenerate after publishing a release:
+#
+#   scripts/fetch-toolchain.sh --print-lock > toolchain.lock
+#
+# The sha256 is checked against the downloaded archive. It is committed here
+# rather than read from the release's own .sha256 asset, because a replaced
+# asset can carry a matching replacement hash. This mirrors how Bazel's
+# toolchains_llvm pins digests in the consumer (extra_llvm_distributions).
+#
+# EMPTY until the first release is published. With no sha256 the download is
+# trusted and a warning is printed.
+
+repository=ilylty/unixnu-toolchain
+tag=
+asset=
+sha256=
+size=
